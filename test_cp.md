@@ -1,0 +1,3 @@
+- use smaller anchor box
+- rpn post nms top n = 100
+- we are sampling max 30 frames from each video
