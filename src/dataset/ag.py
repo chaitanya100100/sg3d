@@ -84,17 +84,15 @@ class AG(Dataset):
         self.cfg = cfg
 
         self.sg_mode = cfg.MODEL.SG_MODE
-        self.use_h3d = cfg.MODEL.USE_H3D
-        self.h3d_path = cfg.DATA.H3D_PATH
+        self.use_h3d = (cfg.MODEL.SUBJECT_FEATURE in ['h3d', 'img_h3d'])
         self.data_root = cfg.DATA.DATA_ROOT
         self.filter_small_box = cfg.DATA.FILTER_SMALL_BOX and (self.sg_mode != 'predcls')
 
+        self.h3d_path = cfg.DATA.H3D_PRED_BBOX_PATH if self.sg_mode == 'sgdet' else cfg.DATA.H3D_GT_BBOX_PATH
         self.frames_path = os.path.join(self.data_root, 'frames/')
 
         self.object_classes = ag_categories
-
         self.relationship_classes = ag_rel_classes
-
         self.attention_relationships = self.relationship_classes[0:3]
         self.spatial_relationships = self.relationship_classes[3:9]
         self.contacting_relationships = self.relationship_classes[9:]
@@ -107,9 +105,6 @@ class AG(Dataset):
         person_bbox = copy.deepcopy(agdata.person_bbox)
         object_bbox = copy.deepcopy(agdata.object_bbox)
         resolution = copy.deepcopy(agdata.resolution)
-        # person_bbox = joblib.load(os.path.join(self.data_root, f'annotations/{prefix}person_bbox.pkl'))
-        # object_bbox = joblib.load(os.path.join(self.data_root, f'annotations/{prefix}object_bbox_and_relationship{suffix}.pkl'))
-        # resolution = joblib.load(os.path.join(self.data_root, 'annotations/resolution.pkl'))
         print('--------------------finish!-------------------------')
         self.person_bbox = copy.deepcopy(person_bbox)
         self.object_bbox = copy.deepcopy(object_bbox)
@@ -178,6 +173,7 @@ class AG(Dataset):
                 self.video_list.append(video)
                 self.gt_annotations.append(gt_annotation_video)
 
+                # code snippet to find the info about h3d predictions. It takes longer time. Only use it to get statistics.
                 # h3d_info = joblib.load(os.path.join(self.h3d_path, video[0].split('/')[0], 'results/demo_.pkl'))
                 # for v in video:
                 #     has_emb = int(len(h3d_info[os.path.join(self.data_root, 'frames', v)]['embedding']) > 0)
@@ -189,10 +185,9 @@ class AG(Dataset):
             else:
                 self.non_person_video += 1
 
-        print("DISCARDING VIDEOS WITH 2 FRAMES ???...")  # see the if else right above
-        print("Frames with h3d: {}, without h3d {}".format(self.h3d_frames, self.non_h3d_frames))
-
         print('x'*60)
+        print("DISCARDING VIDEOS WITH 2 FRAMES ???...")  # see the if else right above
+        # print("Frames with h3d: {}, without h3d {}".format(self.h3d_frames, self.non_h3d_frames))
         if cfg.DATA.FILTER_NONPERSON_BOX_FRAME:
             print('There are {} videos and {} valid frames'.format(len(self.video_list), self.valid_nums))
             print('{} videos are invalid (no person), remove them'.format(self.non_person_video))
@@ -205,29 +200,20 @@ class AG(Dataset):
             print('Removed {} of them without joint heatmaps which means FasterRCNN also cannot find the human'.format("<not available>"))
         print('x' * 60)
 
+        # Data mapper for feeding images to detectron2 detector.
         dcfg = get_config_ag()
         self.data_mapper = MyDatasetMapper(dcfg, is_train=False)
 
     def __getitem__(self, index):
-        # print("Taking index 0 always")
-        # index = 0
 
         frame_names = self.video_list[index]
         
-        # max_len = len(frame_names)  # or x to limit seq len to x
-        # st_idx = random.randint(0, max(0, len(frame_names) - max_len))
-        # frame_names = frame_names[st_idx:st_idx+max_len]
+        if self.use_h3d:
+            h3d_info = joblib.load(os.path.join(self.h3d_path, frame_names[0].split('/')[0] + '.pkl'))
 
         batch = []
         for idx, name in enumerate(frame_names):
 
-            # instances = Instances(im.shape[1:])
-            # instances.gt_boxes = Boxes(torch.stack(boxes))
-            # instances.gt_classes = torch.tensor(class_id, dtype=torch.long)
-            # instances.atten = [b['attention_relationship'] for b in self.gt_annotations[index][idx]]
-            # instances.spati = [b['spatial_relationship'] for b in self.gt_annotations[index][idx]]
-            # instances.conta = [b['contacting_relationship'] for b in self.gt_annotations[index][idx]]
-            
             anns, _, _ = process_one_frame(self.person_bbox[name], self.object_bbox[name])
             width, height = self.resolution[name.split('/')[0]]
             
@@ -236,7 +222,20 @@ class AG(Dataset):
                 'annotations': anns,
                 'width': width, 'height': height,
             }
+            # Data mapper resizes image according to test min/max size config.
+            # It also creates Instances from annotations.
             sample = self.data_mapper(sample)
+
+            if self.use_h3d:
+                human_info = h3d_info[name]  # a list of human info
+                if len(human_info):
+                    assert human_info[0]['embedding'].shape[0] == 4096+2048+2048+99  # [ 4096 appearance, 2048+2048 pose, 95 location ]
+                    fr_h3d_feat =  human_info[0]['embedding'][-2048-99:]  # take pose and location embedding of first person
+                else:
+                    # no human found. take zero embedding. This shouldn't happen for gt bbox but may happen for pred bbox
+                    # if detector can't find the human. This seems to be happening less than 5% of the times.
+                    fr_h3d_feat = torch.zeros(2048+99)
+                sample['h3d_feat'] = fr_h3d_feat
             batch.append(sample)
 
         return batch, index

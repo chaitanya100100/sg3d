@@ -54,6 +54,13 @@ def save_small_subset_ag():
     joblib.dump(small_obj_bbox, os.path.join(root_path, 'annotations/small_object_bbox_and_relationship.pkl'))
     joblib.dump(small_person_bbox, os.path.join(root_path, 'annotations/small_person_bbox.pkl'))
 
+    small_obj_bbox = joblib.load(os.path.join(root_path, 'annotations/small_object_bbox_and_relationship.pkl'))
+    obj_bbox_fs = joblib.load(os.path.join(root_path, 'annotations/object_bbox_and_relationship_filtersmall.pkl'))
+    small_obj_bbox_fs = {}
+    for k in small_obj_bbox.keys():
+        small_obj_bbox_fs[k] = obj_bbox_fs[k]
+    joblib.dump(small_obj_bbox_fs, os.path.join(root_path, 'annotations/small_object_bbox_and_relationship_filtersmall.pkl'))
+
 
 def process_one_frame(pbbox, obbox, stats=None):
     is_train = True
@@ -194,3 +201,19 @@ def get_config_ag():
     cfg.OUTPUT_DIR = "/vision/u/chpatel/test/test"
 
     return cfg
+
+"""
+## TRAIN
+Frames with h3d: 170693, without h3d 6442 (pred bbox)
+There are 7584 videos and 177330 valid frames
+144 videos are invalid (no person), remove them
+49 videos are invalid (only one frame), remove them
+21643 frames have no human bbox in GT, remove them!
+
+## TEST
+Frames with h3d: 54958, without h3d 1922 (pred bbox)
+There are 1750 videos and 56923 valid frames
+41 videos are invalid (no person), remove them
+19 videos are invalid (only one frame), remove them
+8636 frames have no human bbox in GT, remove them!
+"""

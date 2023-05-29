@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from model.word_vectors import obj_edge_vectors
 from model.transformer import transformer
+from detectron2.structures import Boxes
 
 
 class ObjectClassifier(nn.Module):
@@ -15,22 +16,132 @@ class ObjectClassifier(nn.Module):
     Module for computing the object contexts and edge contexts
     """
 
-    def __init__(self, mode='sgdet'):
+    def __init__(self, sg_mode, num_classes, roi_box_pooler, remove_duplicate_pred_objects):
         super(ObjectClassifier, self).__init__()
-        self.mode = mode
+        self.sg_mode = sg_mode
+        self.num_classes = num_classes
+        self.remove_duplicate_pred_objects = remove_duplicate_pred_objects
+
+        if self.sg_mode == 'predcls':
+            return
+
+        self.obj_embed = nn.Embedding(num_classes, 200)
+        # embed_vecs = obj_edge_vectors(obj_classes[1:], wv_type='glove.6B', wv_dir='data', wv_dim=200)
+        # self.obj_embed.weight.data = embed_vecs.clone()
+        print("Not loading GLOVE vectors in object classifier")
+
+        self.decoder_lin = nn.Sequential(nn.Linear(1024 + 200, 1024),
+                                        nn.BatchNorm1d(1024),
+                                        nn.ReLU(),
+                                        nn.Linear(1024, num_classes))
+        self.roi_box_pooler = roi_box_pooler
+
+    def forward_predcls(self, entry):
+        entry['pred_labels'] = entry['labels']
+        entry['scores'] = entry['gt_scores']
+        return entry
+
+    def forward_sgcls(self, entry):
+        # Use detector distribution to get obj label embedding and then use features again with a head
+        # to get new object classification logits. This head will be trained. Since detector already
+        # gives good classification, this part seems redundant.
+        obj_embed = entry['distribution'] @ self.obj_embed.weight  # B x F
+        obj_features = torch.cat((entry['features'], obj_embed), 1)
+        entry['distribution'] = self.decoder_lin(obj_features)
+
+        if self.training:
+            # Use GT labels during training to train transformer. We will use predicted labels during testing.
+            entry['pred_labels'] = entry['labels']
+            entry['scores'] = entry['det_scores']  # I think this is not used.
+        else:
+            box_idx = entry['boxes'][:,0].long() # frame_idx of each bbox
+            b = int(box_idx[-1] + 1)  # total number of frames
+
+            # Get predicted distribution
+            entry['distribution'] = torch.softmax(entry['distribution'], dim=-1)
+            # Discard person class and predict labels and score. Even human bbox will have an object prediction.
+            # We will then explicitly find human bbox in each frame and overwrite.
+            entry['pred_scores'], entry['pred_labels'] = torch.max(entry['distribution'][:, 1:], dim=-1)
+            entry['pred_labels'] = entry['pred_labels'] + 1
+
+            # Use distribution to get the person bbox for each frame
+            human_idx = torch.zeros([b, 1], dtype=torch.int64).to(obj_features.device)
+            global_idx = torch.arange(0, entry['boxes'].shape[0])
+            local_human_idx = [0]*b
+            for i in range(b):
+                lhi = torch.argmax(entry['distribution'][box_idx == i, 0]) # the local bbox index with highest human score in this frame
+                human_idx[i] = global_idx[box_idx == i][lhi]
+                local_human_idx[i] = lhi.item()
+            
+            # But now assign human label to predicted human boxes (overwrite object labels assigned previously to those bboxes)
+            entry['pred_labels'][human_idx.squeeze()] = 0
+            entry['pred_scores'][human_idx.squeeze()] = entry['distribution'][human_idx.squeeze(), 0]
+
+            if self.remove_duplicate_pred_objects:
+                # This finds the duplicate object class for each frame and replaces it with second best predicted class. Hacky!
+                for i in range(b):
+                    present = entry['boxes'][:, 0] == i
+                    duplicate_class = torch.mode(entry['pred_labels'][present])[0]
+                    if torch.sum(entry['pred_labels'][present] ==duplicate_class) > 0:
+                        duplicate_position = entry['pred_labels'][present] == duplicate_class
+                        assert duplicate_class.item() >= 0 and duplicate_class.item() < self.num_classes
+                        ppp = torch.argsort(entry['distribution'][present][duplicate_position][:,duplicate_class])[:-1]
+                        for j in ppp:
+                            changed_idx = global_idx[present][duplicate_position][j]
+                            entry['distribution'][changed_idx, duplicate_class] = 0
+                            entry['pred_labels'][changed_idx] = torch.argmax(entry['distribution'][changed_idx])
+                            entry['pred_scores'][changed_idx] = torch.max(entry['distribution'][changed_idx])
+
+            # Create relations with predicted humans. entry already has relation specific tensors but they are made using
+            # gt labels. During testing, we should use predicted labels to do everything. Hence overwrite those tensors.
+            im_idx = []  # which frame are the relations belong to
+            pair = [] # R x 2
+            pair_single = [] # N x [r x 2]
+            for j, i in enumerate(human_idx):
+                for m in global_idx[box_idx==j][entry['pred_labels'][box_idx==j] != 0]: # this long term contains the other objects in the frame
+                    im_idx.append(j)
+                    pair.append([int(i), int(m)])
+                
+                pair_single.append([])
+                for m in torch.nonzero(entry['pred_labels'][box_idx==j] != 0): 
+                    pair_single[j].append([local_human_idx[j], int(m)])
+
+            for i in range(len(pair_single)): pair_single[i] = torch.tensor(pair_single[i]).long()
+
+            pair = torch.tensor(pair).to(obj_features.device)
+            im_idx = torch.tensor(im_idx, dtype=torch.long).to(obj_features.device)
+            entry['pair_idx'] = pair
+            entry['im_idx'] = im_idx
+            entry['pair_single'] = pair_single
+
+            # Now use predicted potential relations to get union boxes and features.
+            union_boxes = []
+            for i, (ps, boxs) in enumerate(zip(pair_single, entry['scaled_pred_boxes'])):
+                if ps.max().item() >= boxs.shape[0]:
+                    print("in object classifier", ps, boxs)
+                    exit(0)
+                sb, ob = boxs[ps[:,0]], boxs[ps[:,1]]
+                ub = torch.cat([torch.min(sb, ob)[:,:2], torch.max(sb, ob)[:,2:]], 1)
+                union_boxes.append(ub)
+            with torch.no_grad():
+                union_features = self.roi_box_pooler(entry['prepool_features'], [Boxes(ub) for ub in union_boxes])
+                # union_features = self.model.roi_heads.box_head(union_features)  # B x F
+            entry['union_feat'] = union_features
+        return entry
 
     def forward(self, entry):
-        if self.mode  == 'predcls':
-            entry['pred_labels'] = entry['labels']
-            return entry
-        raise NotImplementedError
+        if self.sg_mode  == 'predcls':
+            return self.forward_predcls(entry)
+        elif self.sg_mode == 'sgcls':
+            return self.forward_sgcls(entry)
+        else:
+            raise NotImplementedError
 
 
 class STTran(nn.Module):
 
-    def __init__(self, mode='sgdet',
-                 attention_class_num=None, spatial_class_num=None, contact_class_num=None, obj_classes=None, rel_classes=None,
-                 enc_layer_num=None, dec_layer_num=None):
+    def __init__(self, cfg, roi_box_pooler=None,
+                 attention_class_num=None, spatial_class_num=None, contact_class_num=None, obj_classes=None, rel_classes=None):
 
         """
         :param classes: Object classes
@@ -43,13 +154,15 @@ class STTran(nn.Module):
         self.attention_class_num = attention_class_num
         self.spatial_class_num = spatial_class_num
         self.contact_class_num = contact_class_num
-        assert mode in ('sgdet', 'sgcls', 'predcls')
-        self.mode = mode
+        self.sg_mode = cfg.MODEL.SG_MODE
+        assert self.sg_mode in ('sgdet', 'sgcls', 'predcls')
 
-        self.object_classifier = ObjectClassifier(mode=self.mode)
+        self.object_classifier = ObjectClassifier(
+            cfg.MODEL.SG_MODE, num_classes=len(obj_classes), roi_box_pooler=roi_box_pooler,
+            remove_duplicate_pred_objects=cfg.MODEL.REMOVE_DUPLICATE_PRED_OBJECTS)
 
         ###################################
-        # Relationship head: Conv on RoI features
+        # Relationship head: Conv on RoI union box features
         self.union_func1 = nn.Conv2d(256, 256, 1, 1)
         # self.union_func1 = nn.Conv2d(1024, 256, 1, 1)
 
@@ -71,35 +184,45 @@ class STTran(nn.Module):
 
         self.obj_embed = nn.Embedding(len(obj_classes), 200)
         self.obj_embed2 = nn.Embedding(len(obj_classes), 200)
-        print("NOT LOADING EMBEDDING VECTORS")
         # embed_vecs = obj_edge_vectors(obj_classes, wv_type='glove.6B', wv_dir='data', wv_dim=200)
         # self.obj_embed.weight.data = embed_vecs.clone()
         # self.obj_embed2.weight.data = embed_vecs.clone()
+        print("Not loading GLOVE vectors in STTran")
 
-        self.glocal_transformer = transformer(enc_layer_num=enc_layer_num, dec_layer_num=dec_layer_num, embed_dim=1936, nhead=8,
-                                              dim_feedforward=2048, dropout=0.1, mode='latter')
+        self.glocal_transformer = transformer(
+            enc_layer_num=cfg.MODEL.NUM_ENC_LAYERS, dec_layer_num=cfg.MODEL.NUM_DEC_LAYERS, 
+            embed_dim=1936, nhead=8, dim_feedforward=2048, dropout=0.1, mode='latter')
 
         self.a_rel_compress = nn.Linear(1936, self.attention_class_num)
         self.s_rel_compress = nn.Linear(1936, self.spatial_class_num)
         self.c_rel_compress = nn.Linear(1936, self.contact_class_num)
 
-        self.use_h3d = False
-        if self.use_h3d:
-            # self.h3d_fc = nn.Linear(2048+99, 512)
-            self.h3d_fc = nn.Linear(2048+99+2048, 512)
-            print("USING H3D features in STTran")
+        # What features to use for human subject
+        self.subject_feature_type = cfg.MODEL.SUBJECT_FEATURE
+        if self.subject_feature_type == 'h3d':
+            print("Using H3D features")
+            self.h3d_fc = nn.Linear(2048+99, 512)
+        elif self.subject_feature_type == 'img_h3d':
+            print("Using Image and H3D features")
+            self.h3d_fc = nn.Linear(1024+2048+99, 512)
+        else:
+            assert self.subject_feature_type == 'img'
+
 
     def forward(self, entry):
 
         entry = self.object_classifier(entry)
 
         # visual part
-        if self.use_h3d:
-            # subj_rep = self.h3d_fc(entry['h3d_feat'])
-            # subj_rep = subj_rep[entry['im_idx']]
+        if self.subject_feature_type == 'h3d':
+            subj_rep = self.h3d_fc(entry['h3d_feat'])  # N x F1 to N x F2
+            subj_rep = subj_rep[entry['im_idx']] # R x F2 using rel2im_idx
 
-            inp = [entry['h3d_feat'][entry['im_idx']], entry['features'][entry['pair_idx'][:, 0]]]
+        elif self.subject_feature_type == 'img_h3d':
+            inp = [entry['h3d_feat'][entry['im_idx']], 
+                   entry['features'][entry['pair_idx'][:, 0]]]
             subj_rep = self.h3d_fc(torch.cat(inp, 1))
+        
         else:
             subj_rep = entry['features'][entry['pair_idx'][:, 0]]
             subj_rep = self.subj_fc(subj_rep)

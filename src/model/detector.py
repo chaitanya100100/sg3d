@@ -16,6 +16,8 @@ from utils import print_dict
 
 
 def make_relations(human_idx, gt_anns):
+    # Create relation pairs and necessary tensors
+
     rel2im_idx = []  # which frame are the relations belong to
     pair = []  # R x 2 from list of [human_bbox_idx, obj_bbox_idx]
     a_rel = []  # R x 1 long tensor [ [type_of_attn], [type_of_attn], [type_of_attn] ]
@@ -53,7 +55,7 @@ class Detector(nn.Module):
         super(Detector, self).__init__()
 
         self.sg_mode = cfg.MODEL.SG_MODE
-        assert self.sg_mode == 'predcls'
+        assert self.sg_mode in ['predcls', 'sgcls']
 
         # Load pretrained detector
         dcfg = get_config_ag()
@@ -65,109 +67,105 @@ class Detector(nn.Module):
         self.model = model
 
         self.num_classes = dcfg.MODEL.ROI_HEADS.NUM_CLASSES
-        # self.decoder_lin = nn.Sequential(nn.Linear(1024, 1024),
-        #                                  nn.BatchNorm1d(1024),
-        #                                  nn.ReLU(),
-        #                                  nn.Linear(1024, self.num_classes))
 
     def forward(self, batch, gt_anns, is_train):
 
         device = self.model.device
+        # Longer sequence requires memory-heavy detector inference. Thus we split up the batch
+        # into chunks and gather results.
         batch_size = 10
         with torch.no_grad():
             big_batch = batch
             big_pred_boxes = []
             big_box_features = []
-            big_pred_scores = []
-            big_pred_classes = []
+            big_det_instances = []
             big_scaled_image_sizes = []
             big_prepool_features = []
+            
+            # Do the thing for a batch chunk in each iteration
             for i in range(0, len(big_batch), batch_size):
                 batch = big_batch[i:i+batch_size]
+                # Batch already has resized images. preprocess function does mean centering and required
+                # padding for one stage inference through backbone.
                 scaled_images = self.model.preprocess_image(batch)
                 scaled_image_sizes = scaled_images.image_sizes
                 features = self.model.backbone(scaled_images.tensor)
+                # These prepool features are used in object RoI pooling AND relation union bbox pooling.
                 prepool_features = [features[f] for f in self.model.roi_heads.box_in_features]
 
-                """
-                Bboxes
-                        | training | Inference
-                        |----------|----------
-                predcls |   gt     |    gt
-                sgcls   |   gt     |    gt
-                sgdet   |
-                """
-
-                if self.sg_mode != 'predcls':
-                    proposals, _ = self.model.proposal_generator(scaled_images, features, None)
-                    scaled_instances, _ = self.model.roi_heads(scaled_images, features, proposals, None)
-
-                    # Remove empty boxes. In default model.forward, this step is done in model._postprocess
-                    scaled_instances = [x[x.pred_boxes.nonempty()] for x in scaled_instances]
-                    pred_boxes = [x.pred_boxes for x in scaled_instances]
-                    pred_scores = torch.cat([x.scores for x in scaled_instances])
-                    pred_classes = torch.cat([x.pred_classes for x in scaled_instances])
+                # Use gt bboxes in predcls and sgcls. Otherwise predict it.
+                if self.sg_mode != 'sgdet':
+                    det_instances = []
+                    pred_boxes = [b['instances'].gt_boxes.to(device) for b in batch]
                 else:
-                    scaled_instances = [b['instances'].to(device) for b in batch]
-                    pred_boxes = [x.gt_boxes for x in scaled_instances]
-                    pred_classes = torch.cat([x.gt_classes for x in scaled_instances])
-                    pred_scores = torch.ones_like(pred_classes).float()
+                    proposals, _ = self.model.proposal_generator(scaled_images, features, None)
+                    det_instances, _ = self.model.roi_heads(scaled_images, features, proposals, None)
+                    # Remove empty boxes. In default model.forward, this step is done in model._postprocess
+                    det_instances = [x[x.pred_boxes.nonempty()] for x in det_instances]
+                    pred_boxes = [x.pred_boxes for x in det_instances]
 
+                # Use boxes to pool object features. These object features will be used later in relationship pred.
                 box_features = self.model.roi_heads.box_pooler(prepool_features, pred_boxes)
                 box_features = self.model.roi_heads.box_head(box_features)  # B x F
                 pred_boxes = [b.tensor for b in pred_boxes]  # N x [b x 4]
 
+                # Collecting chunk results
                 big_pred_boxes.extend(pred_boxes)
                 big_scaled_image_sizes.extend(scaled_image_sizes)
                 big_box_features.append(box_features)
-                big_pred_scores.append(pred_scores)
-                big_pred_classes.append(pred_classes)
+                big_det_instances.extend(det_instances)
                 big_prepool_features.append(prepool_features)
-            
-        pred_boxes = big_pred_boxes
+        
+        # Preparing final full batch results
+        pred_boxes = big_pred_boxes # N x [b x 4]
         scaled_image_sizes = big_scaled_image_sizes
         batch = big_batch
-        box_features = torch.cat(big_box_features, dim=0)
-        pred_scores = torch.cat(big_pred_scores, dim=0)
-        pred_classes = torch.cat(big_pred_classes, dim=0)
+        det_instances = big_det_instances # N x [b instances]
+        box_features = torch.cat(big_box_features, dim=0) # B x F
         prepool_features = [torch.cat(pf, dim=0) for pf in zip(*big_prepool_features)]
 
+        # Use object RoI features again to predict classification distribution and labels.
         distribution, _ = self.model.roi_heads.box_predictor(box_features)
+        distribution = distribution[:, :-1]  # remove background class
         distribution = F.softmax(distribution, dim=-1)
+        det_scores, det_labels = torch.max(distribution, dim=-1)
 
-        """
-        Object labels and distribution
-                | training | Inference
-                |----------|----------
-        predcls |   gt     |    gt
-        sgcls   |   gt     |    pred
-        sgdet   |
-        """
-
-        # Prepare for relationship
+        # Prepare relationships with GT labels. This will be overwritten whenever appropriate (like during testing in sgcls).
         num_boxes_per_im = torch.tensor([len(x) for x in pred_boxes], dtype=torch.long)  # N
         box2img_idx = torch.repeat_interleave(torch.arange(len(batch), dtype=torch.long), num_boxes_per_im) # B
-        human_idx = torch.nonzero(pred_classes == 0).view(-1)  # should be N
-
+        gt_labels = torch.cat([b['instances'].gt_classes.to(device) for b in batch]) # B
+        gt_scores = torch.ones(num_boxes_per_im.sum().item(), device=device) # B
+        human_idx = torch.nonzero(gt_labels == 0).view(-1)  # should be N
         rel2im_idx, pair, pair_single, a_rel, s_rel, c_rel = make_relations(human_idx, gt_anns)
         rel2im_idx = rel2im_idx.to(device)
         pair = pair.to(device)
 
-        # Get Union boxes and features
-        union_boxes = []
-        for i, (ps, boxs) in enumerate(zip(pair_single, pred_boxes)):
-            if ps.max().item() >= boxs.shape[0]:
-                print(batch[i], ps, boxs)
-                exit(0)
-            sb, ob = boxs[ps[:,0]], boxs[ps[:,1]]
-            ub = torch.cat([torch.min(sb, ob)[:,:2], torch.max(sb, ob)[:,2:]], 1)
-            union_boxes.append(ub)
+        if self.sg_mode == 'predcls' or (self.sg_mode == 'sgcls' and is_train):
+            # Get union boxes and features using GT relationships.
+            union_boxes = []
+            for i, (ps, boxs) in enumerate(zip(pair_single, pred_boxes)):
+                if ps.max().item() >= boxs.shape[0]:
+                    print(batch[i], ps, boxs)
+                    exit(0)
+                sb, ob = boxs[ps[:,0]], boxs[ps[:,1]]
+                ub = torch.cat([torch.min(sb, ob)[:,:2], torch.max(sb, ob)[:,2:]], 1)
+                union_boxes.append(ub)
 
-        with torch.no_grad():
-            union_features = self.model.roi_heads.box_pooler(prepool_features, [Boxes(ub) for ub in union_boxes])
-            # union_features = self.model.roi_heads.box_head(union_features)  # B x F
+            with torch.no_grad():
+                union_features = self.model.roi_heads.box_pooler(prepool_features, [Boxes(ub) for ub in union_boxes])
+                # union_features = self.model.roi_heads.box_head(union_features)  # B x F
 
-        # rescale bboxes to original image size
+            ret_prepool_features = None # No need to pass prepool features now
+            scaled_pred_boxes = None  # No need to pass scaled boxes now
+        else:
+            # Don't get union boxes with GT labels. Rather, it will be done later after predicting
+            # labels with separate object classification head. Pass relevant prepool features for that.
+            union_features = None
+            ret_prepool_features = prepool_features
+            scaled_pred_boxes = [bb.clone() for bb in pred_boxes]
+
+        # Rescale bboxes to original image size and append img_idx to make [img_idx, x, y, x, y] box. This boxes
+        # will be used in evaluation and it requires to be in this format.
         og_pred_boxes = []
         for scsz, pb, bt in zip(scaled_image_sizes, pred_boxes, batch):
             scale_x, scale_y = bt['width'] / scsz[1],  bt['height'] / scsz[0]
@@ -177,19 +175,39 @@ class Detector(nn.Module):
             og_pred_boxes.append(pb)
         ret_boxes = torch.cat([box2img_idx.to(device)[:, None], torch.cat(og_pred_boxes)], 1)
 
+        # If h3d features are there, add them to entry
+        h3d_feat = None
+        if 'h3d_feat' in batch[0]:
+            h3d_feat = torch.stack([b['h3d_feat'] for b in batch]).to(device)
+
         out = {
+            'h3d_feat': h3d_feat,
+
+            'det_instances': det_instances,
+            'det_labels': det_labels,
+            'det_scores': det_scores,
+            'distribution': distribution,
+            
+            'gt_labels': gt_labels,
+            'gt_scores': gt_scores,
+            'labels': gt_labels,
+            # 'scores' and 'pred_labels' will be assigned later
+
             'boxes': ret_boxes,  # B x 5
-            'labels': pred_classes,
-            'scores': pred_scores,
             'im_idx': rel2im_idx,
             'pair_idx': pair, # R x 2
+            'pair_single_idx': pair_single, # N x [r x 2]
+
             'features': box_features,  # bbox_num x 1024
             'union_feat': union_features,
+            'prepool_features': ret_prepool_features,
+            'scaled_pred_boxes': scaled_pred_boxes,
+            'scaled_image_sizes': scaled_image_sizes,
+
             'attention_gt': a_rel,
             'spatial_gt': s_rel,
             'contacting_gt': c_rel
         }
-        # print(out)
         return out
 
 

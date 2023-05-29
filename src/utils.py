@@ -1,3 +1,7 @@
+def append_to_file(fpath, txt):
+    with open(fpath, "a") as myfile:
+        myfile.write(txt)
+
 def print_dict(d, prefix=""):
     for k, v in d.items():
         kk = prefix + k

@@ -1,3 +1,4 @@
 - use smaller anchor box
 - rpn post nms top n = 100
-- we are sampling max 30 frames from each video
+
+"SGCLs implementation done - somehow getting very high results. H3D implementation done - h3d is not improving the results."

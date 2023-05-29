@@ -11,12 +11,15 @@ import time
 import os
 import sys
 import copy
+import tqdm
+import glob
 
 from config.defaults import get_cfg_defaults
 from dataset.ag import AG, cuda_collate_fn
 from model.detector import Detector
 from model.sttran import STTran
 from model.evaluation_recall import BasicSceneGraphEvaluator
+from contextlib import redirect_stdout
 
 import warnings
 warnings.filterwarnings('ignore', '.*Byte tensor for key_padding_mask in nn.MultiheadAttention.*', )
@@ -33,6 +36,7 @@ cfg.freeze()
 print(cfg.dump())
 if not os.path.exists(cfg.TRAIN.EXP_PATH):
     os.makedirs(cfg.TRAIN.EXP_PATH)
+log_file = os.path.join(cfg.TRAIN.EXP_PATH, 'mylog.txt')
 
 
 AG_dataset_train = AG(cfg, mode='train')
@@ -47,22 +51,61 @@ gpu_device = torch.device("cuda:0")
 object_detector = Detector(cfg).to(device=gpu_device)
 object_detector.eval()
 
-model = STTran(mode=cfg.MODEL.SG_MODE,
-               attention_class_num=len(AG_dataset_train.attention_relationships),
-               spatial_class_num=len(AG_dataset_train.spatial_relationships),
-               contact_class_num=len(AG_dataset_train.contacting_relationships),
-               obj_classes=AG_dataset_train.object_classes,
-               enc_layer_num=cfg.MODEL.NUM_ENC_LAYERS,
-               dec_layer_num=cfg.MODEL.NUM_DEC_LAYERS).to(device=gpu_device)
+roi_box_pooler = copy.deepcopy(object_detector.model.roi_heads.box_pooler)
 
-evaluator =BasicSceneGraphEvaluator(mode=cfg.MODEL.SG_MODE,
-                                    AG_object_classes=AG_dataset_train.object_classes,
-                                    AG_all_predicates=AG_dataset_train.relationship_classes,
-                                    AG_attention_predicates=AG_dataset_train.attention_relationships,
-                                    AG_spatial_predicates=AG_dataset_train.spatial_relationships,
-                                    AG_contacting_predicates=AG_dataset_train.contacting_relationships,
-                                    iou_threshold=0.5,
-                                    constraint='with')
+model = STTran(
+    cfg=cfg,
+    roi_box_pooler=roi_box_pooler,
+    attention_class_num=len(AG_dataset_train.attention_relationships),
+    spatial_class_num=len(AG_dataset_train.spatial_relationships),
+    contact_class_num=len(AG_dataset_train.contacting_relationships),
+    obj_classes=AG_dataset_train.object_classes,
+    ).to(device=gpu_device)
+
+
+ckpt_path = cfg.MODEL.CKPT_PATH
+if ckpt_path == 'last_ckpt':
+    ckpt_path = sorted(glob.glob(os.path.join(cfg.TRAIN.EXP_PATH, 'model_*.tar')))[-1]
+if ckpt_path != '':
+    print(f"Loading ckpt from {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=gpu_device)
+    model.load_state_dict(ckpt['state_dict'], strict=True)
+
+
+all_evaluators = {}
+for constraint_type in ['with', 'no', 'semi']:
+    evaluator =BasicSceneGraphEvaluator(mode=cfg.MODEL.SG_MODE,
+                                        AG_object_classes=AG_dataset_train.object_classes,
+                                        AG_all_predicates=AG_dataset_train.relationship_classes,
+                                        AG_attention_predicates=AG_dataset_train.attention_relationships,
+                                        AG_spatial_predicates=AG_dataset_train.spatial_relationships,
+                                        AG_contacting_predicates=AG_dataset_train.contacting_relationships,
+                                        iou_threshold=0.5,
+                                        semithreshold=0.9,
+                                        constraint=constraint_type)
+    all_evaluators[constraint_type] = evaluator
+
+if cfg.TRAIN.ONLY_TEST:
+    print("Only testing...")
+    model.eval()
+    with torch.no_grad():
+        for b, (batch, index) in tqdm.tqdm(enumerate(dataloader_test)):
+            batch = copy.deepcopy(batch)
+            gt_anns = copy.deepcopy(dataloader_test.dataset.gt_annotations[index])
+
+            entry = object_detector(batch, gt_anns, is_train=False)
+            pred = model(entry)
+
+            for _, evalu in all_evaluators.items():
+                evalu.evaluate_scene_graph(gt_anns, pred)
+
+    for k, evalu in all_evaluators.items():
+        print(f'-------------------------{k} constraint-------------------------------')
+        evalu.print_stats()
+    exit(0)
+else:
+    evaluator = all_evaluators['with']  # Only one type of evaluation during training
+
 
 # loss function, default Multi-label margin loss
 ce_loss = nn.CrossEntropyLoss()
@@ -72,9 +115,6 @@ mlm_loss = nn.MultiLabelMarginLoss()
 optimizer = AdamW(model.parameters(), lr=cfg.TRAIN.LR)
 
 scheduler = ReduceLROnPlateau(optimizer, "max", patience=1, factor=0.5, verbose=True, threshold=1e-4, threshold_mode="abs", min_lr=1e-7)
-
-# some parameters
-tr = []
 
 for epoch in range(cfg.TRAIN.NUM_EPOCHS):
     model.train()
@@ -87,10 +127,6 @@ for epoch in range(cfg.TRAIN.NUM_EPOCHS):
         with torch.no_grad():
             entry = object_detector(batch, gt_anns, is_train=True)
 
-        # if b%10 == 0:
-        #     print(torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
-        # continue
-        # entry['h3d_feat'] = copy.deepcopy(data[5].cuda(0))
         pred = model(entry)
 
         attention_distribution = pred["attention_distribution"]
@@ -119,7 +155,7 @@ for epoch in range(cfg.TRAIN.NUM_EPOCHS):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5, norm_type=2)
         optimizer.step()
 
-        log_freq = 100
+        log_freq = 500
         if b % log_freq == 0 and b >= log_freq:
             time_per_batch = (time.time() - start) / log_freq
             print("\ne{:2d}  b{:5d}/{:5d}  {:.3f}s/batch, {:.1f}m/epoch".format(epoch, b, len(dataloader_train),
@@ -129,11 +165,13 @@ for epoch in range(cfg.TRAIN.NUM_EPOCHS):
 
     torch.save({"state_dict": model.state_dict()}, os.path.join(cfg.TRAIN.EXP_PATH, "model_{}.tar".format(epoch)))
     print("*" * 40)
-    print("save the checkpoint after {} epochs".format(epoch))
+    with open(log_file, 'a') as f:
+        with redirect_stdout(f):
+            print("save the checkpoint after {} epochs".format(epoch))
 
     model.eval()
     with torch.no_grad():
-        for b, (batch, index) in enumerate(dataloader_test):
+        for b, (batch, index) in tqdm.tqdm(enumerate(dataloader_test)):
             batch = copy.deepcopy(batch)
             gt_anns = copy.deepcopy(dataloader_test.dataset.gt_annotations[index])
 
@@ -143,7 +181,9 @@ for epoch in range(cfg.TRAIN.NUM_EPOCHS):
             evaluator.evaluate_scene_graph(gt_anns, pred)
         print('-----------', flush=True)
     score = np.mean(evaluator.result_dict[cfg.MODEL.SG_MODE + "_recall"][20])
-    evaluator.print_stats()
+    with open(log_file, 'a') as f:
+        with redirect_stdout(f):
+            evaluator.print_stats()
     evaluator.reset_result()
     scheduler.step(score)
 
