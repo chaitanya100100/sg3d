@@ -128,40 +128,50 @@ class transformer(nn.Module):
 
 
     def forward(self, features, im_idx):
+        # features: R x F all rel features.
+        # im_idx: R rel2im_idx
         rel_idx = torch.arange(im_idx.shape[0])
 
-        l = torch.sum(im_idx == torch.mode(im_idx)[0])  # the highest box number in the single frame
-        b = int(im_idx[-1] + 1)
-        rel_input = torch.zeros([l, b, features.shape[1]]).to(features.device)
-        masks = torch.zeros([b, l], dtype=torch.uint8).to(features.device)
+        l = torch.sum(im_idx == torch.mode(im_idx)[0])  # the highest box number in the single frame maxb
+        b = int(im_idx[-1] + 1) # number of images N
+        rel_input = torch.zeros([l, b, features.shape[1]]).to(features.device) # maxb x N x F
+        masks = torch.zeros([b, l], dtype=torch.uint8).to(features.device) # N x maxb
+        
         # TODO Padding/Mask maybe don't need for-loop
+        # create zero padded rel input for each frame. mask denotes which rels are real (not-padded).
         for i in range(b):
             rel_input[:torch.sum(im_idx == i), i, :] = features[im_idx == i]
             masks[i, torch.sum(im_idx == i):] = 1
 
         # spatial encoder
+        # spatial attention on maxb x N x F features where maxb is sequence length and N is batch size because of batch_first=False
         local_output, local_attention_weights = self.local_attention(rel_input, masks)
-        local_output = (local_output.permute(1, 0, 2)).contiguous().view(-1, features.shape[1])[masks.view(-1) == 0]
+        local_output = (local_output.permute(1, 0, 2)).contiguous().view(-1, features.shape[1])[masks.view(-1) == 0]  # R x F again
 
-        global_input = torch.zeros([l * 2, b - 1, features.shape[1]]).to(features.device)
-        position_embed = torch.zeros([l * 2, b - 1, features.shape[1]]).to(features.device)
-        idx = -torch.ones([l * 2, b - 1]).to(features.device)
-        idx_plus = -torch.ones([l * 2, b - 1], dtype=torch.long).to(features.device) #TODO
+        # Now temporal part
+        global_input = torch.zeros([l * 2, b - 1, features.shape[1]]).to(features.device)  # 2maxb x N-1 x F
+        position_embed = torch.zeros([l * 2, b - 1, features.shape[1]]).to(features.device) # 2maxb x N-1 x F
+        idx = -torch.ones([l * 2, b - 1]).to(features.device) # 2maxb x N-1
+        idx_plus = -torch.ones([l * 2, b - 1], dtype=torch.long).to(features.device) #TODO # 2maxb x N-1
 
         # sliding window size = 2
         for j in range(b - 1):
+            # take jth and j+1th frame
             global_input[:torch.sum((im_idx == j) + (im_idx == j + 1)), j, :] = local_output[(im_idx == j) + (im_idx == j + 1)]
-            idx[:torch.sum((im_idx == j) + (im_idx == j + 1)), j] = im_idx[(im_idx == j) + (im_idx == j + 1)]
-            idx_plus[:torch.sum((im_idx == j) + (im_idx == j + 1)), j] = rel_idx[(im_idx == j) + (im_idx == j + 1)] #TODO
+            idx         [:torch.sum((im_idx == j) + (im_idx == j + 1)), j] =    im_idx      [(im_idx == j) + (im_idx == j + 1)]
+            idx_plus    [:torch.sum((im_idx == j) + (im_idx == j + 1)), j] =    rel_idx     [(im_idx == j) + (im_idx == j + 1)] #TODO
 
+            # prepare position embedding
             position_embed[:torch.sum(im_idx == j), j, :] = self.position_embedding.weight[0]
             position_embed[torch.sum(im_idx == j):torch.sum(im_idx == j)+torch.sum(im_idx == j+1), j, :] = self.position_embedding.weight[1]
 
+        # N-1 x 2maxb mask created by finding non-zero embedding vectors (weird)
         global_masks = (torch.sum(global_input.view(-1, features.shape[1]),dim=1) == 0).view(l * 2, b - 1).permute(1, 0)
         # temporal decoder
+        # global output is: 2maxb x N-1 x F
         global_output, global_attention_weights = self.global_attention(global_input, global_masks, position_embed)
 
-        output = torch.zeros_like(features)
+        output = torch.zeros_like(features) # R x F
 
         if self.mode == 'both':
             # both
@@ -177,6 +187,9 @@ class transformer(nn.Module):
 
         elif self.mode == 'latter':
             # later
+            # global output is: 2maxb x N-1 x F
+            # Each block is ith and i+1th frame. The output i+1th vector will be taken as the prediction of i+1th frame.
+            # For i=0, the output ith vector of ith frame is taken as exception.
             for j in range(b - 1):
                 if j == 0:
                     output[im_idx == j] = global_output[:, j][idx[:, j] == j]

@@ -11,7 +11,7 @@ from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.structures.boxes import Boxes
 
 
-from dataset.ag_det2 import get_config_ag
+from dataset.ag_det2 import get_config_ag_detector
 from utils import print_dict
 
 
@@ -58,11 +58,11 @@ class Detector(nn.Module):
         assert self.sg_mode in ['predcls', 'sgcls']
 
         # Load pretrained detector
-        dcfg = get_config_ag()
+        dcfg = get_config_ag_detector(cfg.MODEL.DETECTOR_TYPE)
         dcfg.freeze()
         model = build_model(dcfg)
         checkpointer = DetectionCheckpointer(model)
-        checkpointer.load(cfg.MODEL.DETECTOR_WEIGHTS)
+        checkpointer.load(dcfg.MODEL.WEIGHTS)
         model.cuda().eval()
         self.model = model
 
@@ -95,7 +95,8 @@ class Detector(nn.Module):
 
                 # Use gt bboxes in predcls and sgcls. Otherwise predict it.
                 if self.sg_mode != 'sgdet':
-                    det_instances = []
+                    # det_instances = []
+                    det_instances = [b['instances'].to(device) for b in batch]
                     pred_boxes = [b['instances'].gt_boxes.to(device) for b in batch]
                 else:
                     proposals, _ = self.model.proposal_generator(scaled_images, features, None)
@@ -133,8 +134,11 @@ class Detector(nn.Module):
         # Prepare relationships with GT labels. This will be overwritten whenever appropriate (like during testing in sgcls).
         num_boxes_per_im = torch.tensor([len(x) for x in pred_boxes], dtype=torch.long)  # N
         box2img_idx = torch.repeat_interleave(torch.arange(len(batch), dtype=torch.long), num_boxes_per_im) # B
+
+        gt_num_boxes_per_im = torch.tensor([len(b['instances']) for b in batch], dtype=torch.long)  # N
+        gt_box2img_idx = torch.repeat_interleave(torch.arange(len(batch), dtype=torch.long), gt_num_boxes_per_im) # B
         gt_labels = torch.cat([b['instances'].gt_classes.to(device) for b in batch]) # B
-        gt_scores = torch.ones(num_boxes_per_im.sum().item(), device=device) # B
+        gt_scores = torch.ones(gt_num_boxes_per_im.sum().item(), device=device) # B
         human_idx = torch.nonzero(gt_labels == 0).view(-1)  # should be N
         rel2im_idx, pair, pair_single, a_rel, s_rel, c_rel = make_relations(human_idx, gt_anns)
         rel2im_idx = rel2im_idx.to(device)
@@ -190,10 +194,13 @@ class Detector(nn.Module):
             
             'gt_labels': gt_labels,
             'gt_scores': gt_scores,
-            'labels': gt_labels,
-            # 'scores' and 'pred_labels' will be assigned later
+
+            'gt_pair_idx': pair,
+            'gt_im_idx': rel2im_idx,
+            'gt_box2im_idx': gt_box2img_idx,
 
             'boxes': ret_boxes,  # B x 5
+            'box2im_idx': box2img_idx,
             'im_idx': rel2im_idx,
             'pair_idx': pair, # R x 2
             'pair_single_idx': pair_single, # N x [r x 2]

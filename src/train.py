@@ -143,7 +143,7 @@ for epoch in range(cfg.TRAIN.NUM_EPOCHS):
 
         losses = {}
         if cfg.MODEL.SG_MODE in ['sgcls', 'sgdet']:
-            losses['object_loss'] = ce_loss(pred['distribution'], pred['labels'])
+            losses['object_loss'] = ce_loss(pred['distribution'], pred['gt_labels'])
 
         losses["attention_relation_loss"] = ce_loss(attention_distribution, attention_label)
         losses["spatial_relation_loss"] = mlm_loss(spatial_distribution, spatial_label)

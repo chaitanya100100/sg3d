@@ -24,8 +24,9 @@ ag_categories = ['person', 'bag', 'bed', 'blanket', 'book', 'box', 'broom',
           'doorway', 'floor', 'food', 'groceries', 'laptop', 'light', 'medicine', 'mirror', 
           'paper/notebook', 'phone/camera', 'picture', 'pillow', 'refrigerator', 'sandwich', 
           'shelf', 'shoe', 'sofa/couch', 'table', 'television', 'towel', 'vacuum', 'window']
-ag_rel_classes = ['looking_at', 'not_looking_at', 'unsure', 'above', 'beneath', 'in_front_of', 'behind', 
-                  'on_the_side_of', 'in', 'carrying', 'covered_by', 'drinking_from', 'eating', 'have_it_on_the_back',
+ag_rel_classes = ['looking_at', 'not_looking_at', 'unsure', 
+                  'above', 'beneath', 'in_front_of', 'behind',  'on_the_side_of', 'in', 
+                  'carrying', 'covered_by', 'drinking_from', 'eating', 'have_it_on_the_back',
                   'holding', 'leaning_on', 'lying_on', 'not_contacting', 'other_relationship', 'sitting_on', 
                   'standing_on', 'touching', 'twisting', 'wearing', 'wiping', 'writing_on']
 
@@ -167,14 +168,36 @@ def register_action_genome():
         MetadataCatalog.get(f"ag_{stype}").set(evaluator_type='coco')
 
 
+def get_config_ag_detector(dtype):
+    if dtype == 'r50_finetune':
+        cfg = get_config_ag()
+        cfg.OUTPUT_DIR = "/vision/u/chpatel/test/faster_rcnn_ag_2_contd"
+        # cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml")  # Let training initialize from model zoo
+        cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_2_contd/model_final.pth"
+    elif dtype == 'r50_scratch':
+        cfg = get_config_ag()
+        cfg.OUTPUT_DIR = "/vision/u/chpatel/test/faster_rcnn_ag_scratch"
+        cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_scratch/model_final.pth"
+    elif dtype == 'r101_scratch':
+        cfg = get_config_ag()
+        cfg.MODEL.RESNETS.DEPTH = 101
+        cfg.SOLVER.IMS_PER_BATCH = 24
+        cfg.SOLVER.BASE_LR = 0.0003
+        # cfg.SOLVER.CLIP_GRADIENTS.ENABLED = True
+        # cfg.SOLVER.MAX_ITER = 1000
+        # cfg.SOLVER.CHECKPOINT_PERIOD = 500
+        cfg.OUTPUT_DIR = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_r101"
+        cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_r101/model_final.pth"
+    else:
+        raise NotImplementedError
+    return cfg
+
+
 def get_config_ag():
-    
 
     # Prep config
     cfg = get_cfg()
     cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"))
-    # cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml")  # Let training initialize from model zoo
-    cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_2/model_final.pth"
 
     cfg.DATASETS.TRAIN = ("ag_train",)
     cfg.DATASETS.TEST = ("ag_val",)

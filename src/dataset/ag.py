@@ -13,7 +13,7 @@ import copy
 import joblib
 from collections import defaultdict
 
-from .ag_det2 import ag_categories, ag_rel_classes, process_one_frame, get_config_ag
+from .ag_det2 import ag_categories, ag_rel_classes, process_one_frame, get_config_ag_detector
 
 
 from detectron2.data.dataset_mapper import DatasetMapper
@@ -201,7 +201,7 @@ class AG(Dataset):
         print('x' * 60)
 
         # Data mapper for feeding images to detectron2 detector.
-        dcfg = get_config_ag()
+        dcfg = get_config_ag_detector(cfg.MODEL.DETECTOR_TYPE)
         self.data_mapper = MyDatasetMapper(dcfg, is_train=False)
 
     def __getitem__(self, index):
@@ -221,6 +221,7 @@ class AG(Dataset):
                 'file_name': os.path.join(self.frames_path, name),
                 'annotations': anns,
                 'width': width, 'height': height,
+                'name': name.replace('/', '_'),
             }
             # Data mapper resizes image according to test min/max size config.
             # It also creates Instances from annotations.

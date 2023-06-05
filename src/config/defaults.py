@@ -18,7 +18,7 @@ _C.MODEL.NUM_ENC_LAYERS = 1
 _C.MODEL.NUM_DEC_LAYERS = 3
 _C.MODEL.REMOVE_DUPLICATE_PRED_OBJECTS = True
 
-_C.MODEL.DETECTOR_WEIGHTS = '/vision/u/chpatel/test/faster_rcnn_ag_2_contd/model_final.pth'
+_C.MODEL.DETECTOR_TYPE = 'r50_finetune'
 _C.MODEL.CKPT_PATH = ''
 
 _C.TRAIN = CN()

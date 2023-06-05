@@ -65,7 +65,7 @@ for ln in lines:
 
         if constraint_type not in dct: dct[constraint_type] = {}
         if epoch not in dct[constraint_type]: dct[constraint_type][epoch] = {}
-        dct[constraint_type][epoch][metric_type] = float(metric_value)
+        dct[constraint_type][epoch][metric_type] = round(float(metric_value) * 100, 3)
     if ln.startswith('Epoch '): # lr reduction
         continue
     if ln.startswith('----'):
@@ -104,7 +104,8 @@ for exp_name, res in all_metrics['with constraint'].items():
     epochs = list(res.keys())
     max_epoch_idx = np.argmax([v['R@50'] for k, v in res.items()])
     max_epoch = epochs[max_epoch_idx]
-    
+    max_epoch = sorted(epochs)[-1]
+
     new_metrics['exp name'].append(exp_name)
     for m in metric_types_all:
         new_metrics[m].append(res[max_epoch][m])
@@ -112,4 +113,8 @@ for exp_name, res in all_metrics['with constraint'].items():
 
 df = pd.DataFrame(new_metrics, columns=['exp name',]+metric_types_all)
 df = df.sort_values(df.columns[0], ascending = True)
-print(df)
+formatters = {}
+for col in df.select_dtypes("object"):
+    len_max = df[col].str.len().max()
+    formatters[col] = lambda _: f"{_:<{len_max}s}"
+print(df.to_string(formatters=formatters, justify='left'))

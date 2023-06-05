@@ -68,6 +68,9 @@ class BasicSceneGraphEvaluator:
         self.AG_spatial_predicates = AG_spatial_predicates
         self.AG_contacting_predicates = AG_contacting_predicates
         self.semithreshold = semithreshold
+        self.eval_with_bg = True
+        if self.eval_with_bg:
+            print("Evaluating with Background class...")
 
     def reset_result(self):
         self.result_dict[self.mode + '_recall'] = {10: [], 20: [], 50: [], 100: []}
@@ -102,6 +105,7 @@ class BasicSceneGraphEvaluator:
                 for contact in n['contacting_relationship'].numpy().tolist():
                     gt_relations.append([human_idx, m+1, self.AG_all_predicates.index(self.AG_contacting_predicates[contact])])  # for contact triplet <human-object-predicate>
 
+            if self.eval_with_bg: gt_classes = gt_classes + 1
             gt_entry = {
                 'gt_classes': gt_classes,
                 'gt_relations': np.array(gt_relations),
@@ -125,24 +129,29 @@ class BasicSceneGraphEvaluator:
                                             np.zeros([pred['pair_idx'][pred['im_idx'] == idx].shape[0], pred['spatial_distribution'].shape[1]]),
                                             pred['contacting_distribution'][pred['im_idx'] == idx].cpu().numpy()), axis=1)
 
+            pred_classes = pred['pred_labels'].cpu().clone().numpy()
+            if self.eval_with_bg: pred_classes = pred_classes + 1
+
             if self.mode == 'predcls':
 
                 pred_entry = {
                     'pred_boxes': pred['boxes'][:,1:].cpu().clone().numpy(),
-                    'pred_classes': pred['labels'].cpu().clone().numpy(),
+                    'pred_classes': pred_classes,
                     'pred_rel_inds': rels_i,
-                    'obj_scores': pred['scores'].cpu().clone().numpy(),
+                    'obj_scores': pred['pred_scores'].cpu().clone().numpy(),
                     'rel_scores': np.concatenate((pred_scores_1, pred_scores_2, pred_scores_3), axis=0)
                 }
             else:
+
                 pred_entry = {
                     'pred_boxes': pred['boxes'][:, 1:].cpu().clone().numpy(),
-                    'pred_classes': pred['pred_labels'].cpu().clone().numpy(),
+                    'pred_classes': pred_classes,
                     'pred_rel_inds': rels_i,
                     'obj_scores': pred['pred_scores'].cpu().clone().numpy(),
                     'rel_scores': np.concatenate((pred_scores_1, pred_scores_2, pred_scores_3), axis=0)
                 }
 
+            # import IPython; IPython.embed()
             evaluate_from_dict(gt_entry, pred_entry, self.mode, self.result_dict,
                                iou_thresh=self.iou_threshold, method=self.constraint, threshold=self.semithreshold)
 

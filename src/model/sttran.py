@@ -37,8 +37,8 @@ class ObjectClassifier(nn.Module):
         self.roi_box_pooler = roi_box_pooler
 
     def forward_predcls(self, entry):
-        entry['pred_labels'] = entry['labels']
-        entry['scores'] = entry['gt_scores']
+        entry['pred_labels'] = entry['gt_labels']
+        entry['pred_scores'] = entry['gt_scores']
         return entry
 
     def forward_sgcls(self, entry):
@@ -51,8 +51,8 @@ class ObjectClassifier(nn.Module):
 
         if self.training:
             # Use GT labels during training to train transformer. We will use predicted labels during testing.
-            entry['pred_labels'] = entry['labels']
-            entry['scores'] = entry['det_scores']  # I think this is not used.
+            entry['pred_labels'] = entry['gt_labels']
+            entry['pred_scores'] = entry['gt_scores']
         else:
             box_idx = entry['boxes'][:,0].long() # frame_idx of each bbox
             b = int(box_idx[-1] + 1)  # total number of frames

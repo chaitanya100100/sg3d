@@ -49,7 +49,7 @@ from detectron2.evaluation import (
 from detectron2.modeling import build_model
 from detectron2.solver import build_lr_scheduler, build_optimizer
 from detectron2.utils.events import EventStorage
-from dataset.ag_det2 import get_config_ag, register_action_genome
+from dataset.ag_det2 import get_config_ag_detector, register_action_genome
 
 logger = logging.getLogger("detectron2")
 
@@ -160,7 +160,7 @@ def setup(args):
     """
     # cfg = get_cfg()
     # cfg.merge_from_file(args.config_file)
-    cfg = get_config_ag()
+    cfg = get_config_ag_detector('<decide a type>')
     cfg.merge_from_list(args.opts)
     cfg.freeze()
     default_setup(

@@ -1,4 +1,4 @@
 - use smaller anchor box
 - rpn post nms top n = 100
 
-"SGCLs implementation done - somehow getting very high results. H3D implementation done - h3d is not improving the results."
+"R101 detector from scratch. Testing with bg didn't make a difference. Transformer code made readable by comments. Visualization code added."
