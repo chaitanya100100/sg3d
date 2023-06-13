@@ -160,7 +160,7 @@ def setup(args):
     """
     # cfg = get_cfg()
     # cfg.merge_from_file(args.config_file)
-    cfg = get_config_ag_detector('<decide a type>')
+    cfg = get_config_ag_detector('r50_scratch_bkp')
     cfg.merge_from_list(args.opts)
     cfg.freeze()
     default_setup(

@@ -178,6 +178,12 @@ def get_config_ag_detector(dtype):
         cfg = get_config_ag()
         cfg.OUTPUT_DIR = "/vision/u/chpatel/test/faster_rcnn_ag_scratch"
         cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_scratch/model_final.pth"
+    elif dtype == 'r50_scratch_bkp':
+        cfg = get_config_ag()
+        cfg.OUTPUT_DIR = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_bkp"
+        cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_bkp/model_final.pth"
+        cfg.SOLVER.STEPS = (130000,140000,160000)
+        cfg.SOLVER.MAX_ITER = 180000
     elif dtype == 'r101_scratch':
         cfg = get_config_ag()
         cfg.MODEL.RESNETS.DEPTH = 101
@@ -188,6 +194,22 @@ def get_config_ag_detector(dtype):
         # cfg.SOLVER.CHECKPOINT_PERIOD = 500
         cfg.OUTPUT_DIR = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_r101"
         cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_r101/model_final.pth"
+    elif dtype == 'r101_scratch_aa1':
+        cfg = get_config_ag()
+        cfg.MODEL.RESNETS.DEPTH = 101
+        cfg.SOLVER.IMS_PER_BATCH = 24
+        cfg.SOLVER.BASE_LR = 0.001
+        # cfg.SOLVER.CLIP_GRADIENTS.ENABLED = True
+        # cfg.SOLVER.MAX_ITER = 1000
+        # cfg.SOLVER.CHECKPOINT_PERIOD = 500
+        
+        cfg.INPUT.MIN_SIZE_TRAIN = (640,)
+        cfg.INPUT.MIN_SIZE_TEST = 640
+
+        cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[8], [16], [32], [64], [128]] # STTran had somehow [4,8,16,32]. original was [[32], [64], [128], [256], [512]]
+        cfg.MODEL.RPN.POST_NMS_TOPK_TEST = 100
+        cfg.OUTPUT_DIR = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_r101_aa1"
+        cfg.MODEL.WEIGHTS = "/vision/u/chpatel/test/faster_rcnn_ag_scratch_r101_aa1/model_final.pth"
     else:
         raise NotImplementedError
     return cfg

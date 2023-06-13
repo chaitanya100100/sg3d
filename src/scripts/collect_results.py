@@ -3,11 +3,36 @@ from collections import defaultdict
 
 import pandas as pd
 import numpy as np
+import os
 
 
-fpath = "/vision/u/chpatel/STTran_3d/test_cp.md"
+fpath = "/vision/u/chpatel/sg3d/bkp_results.md"
+fpath = "/vision/u/chpatel/sg3d/results.md"
 with open(fpath, 'r') as fpt:
     lines = fpt.readlines()
+
+for fpath in [
+    "/vision/u/chpatel/test/mysg_detscratch_sgcls/",
+    "/vision/u/chpatel/test/mysg_detscratch_sgcls_h3d/",
+    "/vision/u/chpatel/test/mysg_detscratch_sgcls_imgh3d/",
+    "/vision/u/chpatel/test/mysg_detscratch_sgcls_imgh3dmlm/",
+#     "/vision/u/chpatel/test/mysg_detscratch_sgcls_lr1e4/",
+#     "/vision/u/chpatel/test/mysg_detscratch_sgcls_h3d_lr1e4/",
+    "/vision/u/chpatel/test/mysg_detr101scratch_sgcls/",
+    "/vision/u/chpatel/test/mysg_detr101scratch_sgcls_h3d/",
+    "/vision/u/chpatel/test/mysg_detr101scratch_sgcls_imgh3d/",
+    "/vision/u/chpatel/test/mysg_detr101scratch_sgcls_addall/",
+    "/vision/u/chpatel/test/mysg_detr101scratch_sgcls_imgh3d_addall/",
+    # "/vision/u/chpatel/test/mysg_detr101scratch_sgcls_lr3e5/",
+    "/vision/u/chpatel/test/mysg_detr101scratchaa1_sgcls/",
+    "/vision/u/chpatel/test/mysg_detr101scratchaa1_sgcls_h3d/",
+    "/vision/u/chpatel/test/mysg_detr101scratchaa1_sgcls_imgh3d/",
+]:
+    exp_name = os.path.basename(os.path.dirname(fpath))
+    lines += [f"## {exp_name}"]
+    with open(fpath + '/mylog.txt', 'r') as fpt:
+        lines += fpt.readlines()
+
 
 metric_types_all = ['R@10','R@20','R@50','R@100']
 all_metrics = {
@@ -97,7 +122,7 @@ def nested_dict_to_df(values_dict):
     # df.columns = df.columns.map("{0[1]}".format)
     return df
 
-new_metrics = {'exp name': []}
+new_metrics = {'exp name': [], 'Epoch': []}
 new_metrics.update({m: [] for m in metric_types_all})
 for exp_name, res in all_metrics['with constraint'].items():
     
@@ -107,11 +132,12 @@ for exp_name, res in all_metrics['with constraint'].items():
     max_epoch = sorted(epochs)[-1]
 
     new_metrics['exp name'].append(exp_name)
+    new_metrics['Epoch'].append(max_epoch)
     for m in metric_types_all:
         new_metrics[m].append(res[max_epoch][m])
 
 
-df = pd.DataFrame(new_metrics, columns=['exp name',]+metric_types_all)
+df = pd.DataFrame(new_metrics, columns=['exp name','Epoch']+metric_types_all)
 df = df.sort_values(df.columns[0], ascending = True)
 formatters = {}
 for col in df.select_dtypes("object"):

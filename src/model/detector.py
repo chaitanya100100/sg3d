@@ -9,6 +9,7 @@ import os
 from detectron2.modeling import build_model
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.structures.boxes import Boxes
+from model.draw_rectangles.draw_rectangles import draw_union_boxes
 
 
 from dataset.ag_det2 import get_config_ag_detector
@@ -63,10 +64,12 @@ class Detector(nn.Module):
         model = build_model(dcfg)
         checkpointer = DetectionCheckpointer(model)
         checkpointer.load(dcfg.MODEL.WEIGHTS)
+        print("Loading detector from ", dcfg.MODEL.WEIGHTS)
         model.cuda().eval()
         self.model = model
 
         self.num_classes = dcfg.MODEL.ROI_HEADS.NUM_CLASSES
+        self.use_spatial_mask = cfg.MODEL.USE_SPATIAL_MASK
 
     def forward(self, batch, gt_anns, is_train):
 
@@ -147,17 +150,22 @@ class Detector(nn.Module):
         if self.sg_mode == 'predcls' or (self.sg_mode == 'sgcls' and is_train):
             # Get union boxes and features using GT relationships.
             union_boxes = []
+            pair_boxes = [] # R x 8
             for i, (ps, boxs) in enumerate(zip(pair_single, pred_boxes)):
                 if ps.max().item() >= boxs.shape[0]:
                     print(batch[i], ps, boxs)
                     exit(0)
                 sb, ob = boxs[ps[:,0]], boxs[ps[:,1]]
+                pair_boxes.append(torch.cat([sb, ob], -1))
                 ub = torch.cat([torch.min(sb, ob)[:,:2], torch.max(sb, ob)[:,2:]], 1)
                 union_boxes.append(ub)
 
             with torch.no_grad():
                 union_features = self.model.roi_heads.box_pooler(prepool_features, [Boxes(ub) for ub in union_boxes])
-                # union_features = self.model.roi_heads.box_head(union_features)  # B x F
+                # union_features = self.model.roi_heads.box_head(union_features)  # R x F
+                spatial_masks = None
+                if self.use_spatial_mask:
+                    spatial_masks = torch.tensor(draw_union_boxes(torch.cat(pair_boxes).cpu().detach().numpy(), 27) - 0.5).to(device)
 
             ret_prepool_features = None # No need to pass prepool features now
             scaled_pred_boxes = None  # No need to pass scaled boxes now
@@ -165,6 +173,7 @@ class Detector(nn.Module):
             # Don't get union boxes with GT labels. Rather, it will be done later after predicting
             # labels with separate object classification head. Pass relevant prepool features for that.
             union_features = None
+            spatial_masks = None
             ret_prepool_features = prepool_features
             scaled_pred_boxes = [bb.clone() for bb in pred_boxes]
 
@@ -207,6 +216,7 @@ class Detector(nn.Module):
 
             'features': box_features,  # bbox_num x 1024
             'union_feat': union_features,
+            'spatial_masks': spatial_masks,
             'prepool_features': ret_prepool_features,
             'scaled_pred_boxes': scaled_pred_boxes,
             'scaled_image_sizes': scaled_image_sizes,

@@ -84,7 +84,7 @@ class AG(Dataset):
         self.cfg = cfg
 
         self.sg_mode = cfg.MODEL.SG_MODE
-        self.use_h3d = (cfg.MODEL.SUBJECT_FEATURE in ['h3d', 'img_h3d'])
+        self.use_h3d = (cfg.MODEL.SUBJECT_FEATURE in ['h3d', 'img_h3d', 'img_h3d_mlm'])
         self.data_root = cfg.DATA.DATA_ROOT
         self.filter_small_box = cfg.DATA.FILTER_SMALL_BOX and (self.sg_mode != 'predcls')
 
